@@ -1,15 +1,18 @@
 import asyncio
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 
+# =========================
 # 🔹 FSM States
 # =========================
 class TradeForm(StatesGroup):
@@ -18,32 +21,38 @@ class TradeForm(StatesGroup):
     bank = State()
     buy_price = State()
     sell_price = State()
-    amount_usdt = State()
-    fee_percent = State()
+    amount = State()
+    fee = State()
 
 
 # =========================
 # 🔹 Business Logic
 # =========================
-def calculate_trade(buy: float, sell: float, amount: float, fee_percent: float):
-    spread_percent = (sell - buy) / sell * 100
-    net_percent = spread_percent - fee_percent
+def calculate_trade(buy: float, sell: float, amount: float, fee: float):
+    spread = sell - buy                          # спред за 1 одиницю активу (грн)
+    spread_percent = spread / buy * 100          # спред у відсотках
 
-    profit = (sell - buy) * amount * (1 - fee_percent / 100)
-    total_fee = (sell - buy) * amount * (fee_percent / 100)
+    spent = buy * amount                         # витрачено грн на купівлю
+    real_amount = amount - fee                   # реально активу після комісії
+    received = sell * real_amount                # отримано грн з продажу
+
+    profit = received - spent                    # чистий прибуток (грн)
+    net_percent = profit / spent * 100           # чистий відсоток
+    fee_grn = fee * sell                         # комісія у грн (за курсом продажу)
 
     return {
+        "spread": spread,
         "spread_percent": spread_percent,
+        "real_amount": real_amount,
+        "fee_grn": fee_grn,
+        "profit": profit,
         "net_percent": net_percent,
-        "total_fee": total_fee,
-        "profit": profit
     }
 
 
 # =========================
 # 🔹 Handlers
 # =========================
-
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Введи біржу:")
@@ -55,15 +64,16 @@ async def exchange_select(message: Message, state: FSMContext):
     await message.answer("Введи актив:")
     await state.set_state(TradeForm.asset)
 
-    
+
 async def asset_select(message: Message, state: FSMContext):
     await state.update_data(asset=message.text)
     await message.answer("Введи банк:")
     await state.set_state(TradeForm.bank)
 
+
 async def bank_select(message: Message, state: FSMContext):
     await state.update_data(bank=message.text)
-    await message.answer("Введи **ціну купівлі**:")
+    await message.answer("Введи *ціну купівлі*:")
     await state.set_state(TradeForm.buy_price)
 
 
@@ -75,7 +85,7 @@ async def buy_price_handler(message: Message, state: FSMContext):
         return
 
     await state.update_data(buy_price=value)
-    await message.answer("Введи **ціну продажу**:")
+    await message.answer("Введи *ціну продажу*:")
     await state.set_state(TradeForm.sell_price)
 
 
@@ -87,8 +97,10 @@ async def sell_price_handler(message: Message, state: FSMContext):
         return
 
     await state.update_data(sell_price=value)
-    await message.answer("Введи **кількість USDT**:")
-    await state.set_state(TradeForm.amount_usdt)
+    data = await state.get_data()
+    asset = data.get("asset", "активу")
+    await message.answer(f"Введи *кількість {asset}*:")
+    await state.set_state(TradeForm.amount)
 
 
 async def amount_handler(message: Message, state: FSMContext):
@@ -98,43 +110,46 @@ async def amount_handler(message: Message, state: FSMContext):
         await message.answer("❌ Введи число")
         return
 
-    await state.update_data(amount_usdt=value)
-    await message.answer("Введи **комісію (%)**:")
-    await state.set_state(TradeForm.fee_percent)
+    await state.update_data(amount=value)
+    data = await state.get_data()
+    asset = data.get("asset", "активу")
+    await message.answer(f"Введи *комісію ({asset})*:")
+    await state.set_state(TradeForm.fee)
 
 
 async def fee_handler(message: Message, state: FSMContext):
     try:
-        fee_percent = float(message.text.replace(",", "."))
+        fee = float(message.text.replace(",", "."))
     except ValueError:
         await message.answer("❌ Введи число")
         return
 
-    await state.update_data(fee_percent=fee_percent)
+    await state.update_data(fee=fee)
     data = await state.get_data()
+    asset = data.get("asset", "активу")
 
     result = calculate_trade(
         buy=data["buy_price"],
         sell=data["sell_price"],
-        amount=data["amount_usdt"],
-        fee_percent=fee_percent
-
+        amount=data["amount"],
+        fee=fee,
     )
 
     await message.answer(
-        f"📊 **Результат:**\n"
+        f"📊 *Результат:*\n"
         f"Біржа: {data['exchange']}\n"
         f"Актив: {data['asset']}\n"
         f"Банк: {data['bank']}\n"
         f"Купівля: {data['buy_price']}\n"
         f"Продаж: {data['sell_price']}\n"
-        f"USDT: {data['amount_usdt']}\n"
-        f"Комісія: {fee_percent}%\n\n"
-        f"Спред: {result['spread_percent']:.2f}%\n"
+        f"{asset}: {data['amount']}\n"
+        f"Комісія: {fee} {asset}\n\n"
+        f"Спред: {result['spread']:.2f} грн/{asset} ({result['spread_percent']:.2f}%)\n"
+        f"Реально {asset}: {result['real_amount']:.2f}\n"
+        f"Комісія: {result['fee_grn']:.2f} грн\n"
         f"Чистий відсоток: {result['net_percent']:.2f}%\n"
-        f"💰 Профіт: {result['profit']:.2f} USDT"
+        f"💰 Профіт: {result['profit']:.2f} грн"
     )
-
 
     await state.clear()
 
@@ -143,24 +158,26 @@ async def fee_handler(message: Message, state: FSMContext):
 # 🔹 TEST COMMAND
 # =========================
 async def test_handler(message: Message):
-    buy = 44.36
-    sell = 44.5
-    amount = 195
-    fee_percent = 0.4
+    buy = 45.64
+    sell = 46.22
+    amount = 65.79
+    fee = 0.21
+    asset = "USDT"
 
-    result = calculate_trade(buy, sell, amount, fee_percent)
+    result = calculate_trade(buy, sell, amount, fee)
 
     await message.answer(
-        f"🧪 **TEST MODE**\n"
+        f"🧪 *TEST MODE*\n"
         f"Купівля: {buy}\n"
         f"Продаж: {sell}\n"
-        f"USDT: {amount}\n"
-        f"Комісія: {fee_percent}%\n\n"
-        f"Комісія: {result['total_fee']:.2f} USDT\n"
-        f"Спред: {result['spread_percent']:.2f}%\n"
-        f"Чистий відсоток: {result['net_percent']:.2f}\n"
-        f"Профіт: {result['profit']:.2f}"
-        )
+        f"{asset}: {amount}\n"
+        f"Комісія: {fee} {asset}\n\n"
+        f"Спред: {result['spread']:.2f} грн/{asset} ({result['spread_percent']:.2f}%)\n"
+        f"Реально {asset}: {result['real_amount']:.2f}\n"
+        f"Комісія: {result['fee_grn']:.2f} грн\n"
+        f"Чистий відсоток: {result['net_percent']:.2f}%\n"
+        f"💰 Профіт: {result['profit']:.2f} грн"
+    )
 
 
 # =========================
@@ -181,8 +198,8 @@ async def main():
     dp.message.register(bank_select, TradeForm.bank)
     dp.message.register(buy_price_handler, TradeForm.buy_price)
     dp.message.register(sell_price_handler, TradeForm.sell_price)
-    dp.message.register(amount_handler, TradeForm.amount_usdt)
-    dp.message.register(fee_handler, TradeForm.fee_percent)
+    dp.message.register(amount_handler, TradeForm.amount)
+    dp.message.register(fee_handler, TradeForm.fee)
 
     await dp.start_polling(bot)
 
